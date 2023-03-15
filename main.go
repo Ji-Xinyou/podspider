@@ -9,22 +9,21 @@ import (
 )
 
 func logger_init(config ctrler.CtrlerConfig) {
-	switch config.Log_level {
-	case "debug":
-		log.SetLevel(log.DebugLevel)
-	case "info":
-		log.SetLevel(log.InfoLevel)
-	case "warn":
-		log.SetLevel(log.WarnLevel)
-	case "error":
-		log.SetLevel(log.ErrorLevel)
-	case "fatal":
-		log.SetLevel(log.FatalLevel)
-	case "panic":
-		log.SetLevel(log.PanicLevel)
-	default:
-		log.SetLevel(log.InfoLevel)
+	logLevels := map[string]log.Level{
+		"debug": log.DebugLevel,
+		"info":  log.InfoLevel,
+		"warn":  log.WarnLevel,
+		"error": log.ErrorLevel,
+		"fatal": log.FatalLevel,
+		"panic": log.PanicLevel,
 	}
+
+	level, ok := logLevels[config.Log_level]
+	if !ok {
+		level = log.InfoLevel
+	}
+
+	log.SetLevel(level)
 
 	log.SetOutput(os.Stdout)
 }

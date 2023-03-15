@@ -1,55 +1,42 @@
 package resource
 
 import (
+	"bytes"
 	"context"
 	"flag"
+	"fmt"
 	"path/filepath"
 
 	log "github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/client-go/tools/remotecommand"
 	"k8s.io/client-go/util/homedir"
 	"k8s.io/metrics/pkg/apis/metrics/v1beta1"
 	"k8s.io/metrics/pkg/client/clientset/versioned"
 )
 
 // ========== SOME HELPERS BELOW
-// return the clientset of the cluster, this works as a handle
-// this reads config from ~/.kube/config of the machine where this program is running
-func ClusterHandle(kubeconfig string) *kubernetes.Clientset {
-	// use the current context in kubeconfig
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
-	if err != nil {
-		panic(err.Error())
-	}
-
+func (mgr *ResourceManager) generateClientsets() {
 	// create the clientset
-	clientset, err := kubernetes.NewForConfig(config)
+	clientset, err := kubernetes.NewForConfig(mgr.kubeconfig)
 	if err != nil {
 		panic(err.Error())
 	}
 
-	return clientset
+	metricsClientset, err := versioned.NewForConfig(mgr.kubeconfig)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	mgr.clientset = clientset
+	mgr.metric_clientset = metricsClientset
 }
 
-func MetricHandle(kubeconfig string) *versioned.Clientset {
-	// use the current context in kubeconfig
-	config, err := clientcmd.BuildConfigFromFlags("", kubeconfig)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	metricsClientset, err := versioned.NewForConfig(config)
-	if err != nil {
-		panic(err.Error())
-	}
-
-	return metricsClientset
-}
-
-func GenerateKubeconfig() string {
+func generateKubeconfig() *rest.Config {
 	var kubeconfig *string
 	if home := homedir.HomeDir(); home != "" {
 		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
@@ -58,18 +45,23 @@ func GenerateKubeconfig() string {
 	}
 	flag.Parse()
 
-	return *kubeconfig
+	config, err := clientcmd.BuildConfigFromFlags("", *kubeconfig)
+	if err != nil {
+		panic(err.Error())
+	}
+
+	return config
 }
 
 // HELPERS ABOVE
 
 type ResourceManager struct {
 	// the path where the kubeconfig is
-	kubeconfig string
+	kubeconfig *rest.Config
 	// the handle to get the cluster info
-	cluster_handle *kubernetes.Clientset
+	clientset *kubernetes.Clientset
 	// the handle to get the cluster metrics
-	metric_handle *versioned.Clientset
+	metric_clientset *versioned.Clientset
 	// the namespace this resource manager is watching
 	watched_ns string
 	// pod name -> container name -> term -> value
@@ -78,17 +70,17 @@ type ResourceManager struct {
 
 // Initialization
 func (mgr *ResourceManager) Start(ns string) {
-	mgr.kubeconfig = GenerateKubeconfig()
-	mgr.cluster_handle = ClusterHandle(mgr.kubeconfig)
-	mgr.metric_handle = MetricHandle(mgr.kubeconfig)
+	mgr.kubeconfig = generateKubeconfig()
+	mgr.generateClientsets()
 
 	mgr.watched_ns = ns
 	mgr.resources = make(map[string]map[string]map[string]int64)
 }
 
+// also helpers
 func (mgr *ResourceManager) getPods() *v1.PodList {
 	// lists the nodes' info of the cluster
-	pods, err := mgr.cluster_handle.CoreV1().Pods(mgr.watched_ns).List(context.TODO(), metav1.ListOptions{})
+	pods, err := mgr.clientset.CoreV1().Pods(mgr.watched_ns).List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		panic(err.Error())
 	}
@@ -97,7 +89,7 @@ func (mgr *ResourceManager) getPods() *v1.PodList {
 
 // return the metrics of the pod, given the pod name and namespace
 func (mgr *ResourceManager) getPodMetrics(pod v1.Pod) *v1beta1.PodMetrics {
-	metrics, err := mgr.metric_handle.MetricsV1beta1().PodMetricses(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+	metrics, err := mgr.metric_clientset.MetricsV1beta1().PodMetricses(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
 
 	// Some of the time, the metric server cannot return the metrics of the pod
 	// Therefore this should never panic
@@ -151,6 +143,41 @@ func (mgr *ResourceManager) recordPodMetrics() {
 	}
 }
 
+// ! ASSUMES ONE CONTAINER PER POD
+// post command "cmd argv" to the pod's container, return its output
+// e.g. running "ls /" on the pod's container
+func (mgr *ResourceManager) postCommand(pod v1.Pod, cmd string, argv string) (string, error) {
+	req := mgr.clientset.CoreV1().RESTClient().Post().
+		Resource("pods").
+		Name(pod.Name).
+		Namespace(pod.Namespace).
+		SubResource("exec").
+		Param("container", pod.Spec.Containers[0].Name).
+		Param("stdout", "true").
+		Param("stderr", "true").
+		Param("command", cmd).
+		Param("command", argv)
+
+	exec, err := remotecommand.NewSPDYExecutor(mgr.kubeconfig, "POST", req.URL())
+	if err != nil {
+		panic(err)
+	}
+
+	out := new(bytes.Buffer)
+	errOut := new(bytes.Buffer)
+
+	err = exec.StreamWithContext(context.Background(), remotecommand.StreamOptions{
+		Stdout: out,
+		Stderr: errOut,
+	})
+
+	if err != nil {
+		return errOut.String(), err
+	}
+
+	return out.String(), nil
+}
+
 // ========== GETTERS ==========
 func (mgr *ResourceManager) GetCpuRequest(podname string, ctrname string) int64 {
 	return mgr.resources[podname][ctrname]["cpu_request"]
@@ -177,17 +204,46 @@ func (mgr *ResourceManager) GetMemUsage(podname string, ctrname string) int64 {
 }
 
 // ========== DUMPERS ==========
-func (mgr *ResourceManager) DumpPods() {
+func (mgr *ResourceManager) DumpNodes() {
+	nodes := mgr.clientset.CoreV1().Nodes()
+	nodeList, err := nodes.List(context.TODO(), metav1.ListOptions{})
+
+	if err != nil {
+		panic(err.Error())
+	}
+
+	for _, node := range nodeList.Items {
+		nodeName := node.Name
+		nodeMetrics, err := mgr.metric_clientset.MetricsV1beta1().NodeMetricses().Get(context.Background(), nodeName, metav1.GetOptions{})
+		if err != nil {
+			log.Debug("Error getting node metrics: ", err)
+		}
+
+		cpuUsage := nodeMetrics.Usage.Cpu().MilliValue()
+		memoryUsage := nodeMetrics.Usage.Memory().Value()
+		cpuCapacity := node.Status.Capacity.Cpu().MilliValue()
+		memoryCapacity := node.Status.Capacity.Memory().Value()
+
+		cpu_usage := fmt.Sprintf("%.*f", 4, float64(cpuUsage)/float64(cpuCapacity)*100) + "%"
+		mem_usage := fmt.Sprintf("%.*f", 4, float64(memoryUsage)/float64(memoryCapacity)*100) + "%"
+
+		log.Info("Node: ", nodeName, "\tCPU usage: ", cpu_usage, "\tMemory usage: ", mem_usage)
+	}
+}
+
+func (mgr *ResourceManager) DumpRootDir() {
 	pods := mgr.getPods()
-	npod := len(pods.Items)
 
 	for _, pod := range pods.Items {
-		name, namespace := pod.Name, pod.Namespace
-		log.WithFields(log.Fields{
-			"npod":          npod,
-			"pod name":      name,
-			"pod namespace": namespace,
-		}).Info("Dumping pods")
+		if pod.Status.Phase == v1.PodRunning {
+			out, err := mgr.postCommand(pod, "cat", "/proc/net/netstat")
+			if err != nil {
+				log.Error("Error getting root dir: ", err, " | Error msg: ", out)
+				continue
+			}
+
+			log.Info("Root dir of pod ", pod.Name, ": ", out)
+		}
 	}
 }
 
@@ -221,7 +277,29 @@ func (mgr *ResourceManager) showStats(pod v1.Pod) {
 	}).Info("Dumping Pod usage")
 }
 
+func (mgr *ResourceManager) GetCpuMetrics() CpuMetric {
+	cpuMetric := CpuMetric{}
+	return cpuMetric
+}
+
+func (mgr *ResourceManager) GetMemoryMetrics() MemoryMetric {
+	memMetric := MemoryMetric{}
+	return memMetric
+}
+
+func (mgr *ResourceManager) GetNetworkMetrics() NetworkMetric {
+	netMetric := NetworkMetric{}
+	return netMetric
+}
+
+func (mgr *ResourceManager) GetDiskMetrics() DiskMetric {
+	diskMetric := DiskMetric{}
+	return diskMetric
+}
+
 func (mgr *ResourceManager) Tick() {
-	mgr.recordPodMetrics()
-	mgr.DumpPodMetrics(mgr.watched_ns)
+	// mgr.recordPodMetrics()
+	// mgr.DumpNodes()
+	// mgr.DumpPodMetrics(mgr.watched_ns)
+	mgr.DumpRootDir()
 }

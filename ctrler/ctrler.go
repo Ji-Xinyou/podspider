@@ -1,7 +1,7 @@
 package ctrler
 
 import (
-	"dspm/ctrler/resource"
+	"podspider/ctrler/resource"
 	"time"
 
 	log "github.com/sirupsen/logrus"
@@ -31,9 +31,6 @@ func (ctrler *ClusterCtrler) Start() {
 }
 
 func (ctrler *ClusterCtrler) tick() {
-	// 1. gather cluster information
-	// 2. make resource decision
-	// 3. make migration decision
-	log.Info("ClusterCtrler Ticking")
+	log.Debug("ClusterCtrler Ticking")
 	ctrler.resource_mgr.Tick()
 }

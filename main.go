@@ -5,24 +5,33 @@ import (
 
 	log "github.com/sirupsen/logrus"
 
-	"dspm/ctrler"
+	"podspider/ctrler"
 )
 
-func logger_init(env string) {
-	if env == "production" {
-		// prod mode, output to stderr
-		log.SetFormatter(&log.JSONFormatter{})
-		log.SetLevel(log.InfoLevel)
-	} else {
-		// debug mode, output to stdout
+func logger_init(config ctrler.CtrlerConfig) {
+	switch config.Log_level {
+	case "debug":
 		log.SetLevel(log.DebugLevel)
-		log.SetOutput(os.Stdout)
+	case "info":
+		log.SetLevel(log.InfoLevel)
+	case "warn":
+		log.SetLevel(log.WarnLevel)
+	case "error":
+		log.SetLevel(log.ErrorLevel)
+	case "fatal":
+		log.SetLevel(log.FatalLevel)
+	case "panic":
+		log.SetLevel(log.PanicLevel)
+	default:
+		log.SetLevel(log.InfoLevel)
 	}
+
+	log.SetOutput(os.Stdout)
 }
 
 func main() {
-	config := ctrler.NewCtrlerConfig("/home/xyji/dspm_config.toml")
-	logger_init(config.Build_mode)
+	config := ctrler.NewCtrlerConfig("./ps_config.toml")
+	logger_init(config)
 
 	config.Tick_interval = 1
 	ctrler := ctrler.MakeClusterCtrler(config)

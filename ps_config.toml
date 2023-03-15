@@ -1,0 +1,8 @@
+# debug or production mode
+Log_level = "debug"
+
+# tick interval
+Tick_interval = 5
+
+# Watched NS
+WatchedNS = "spark"

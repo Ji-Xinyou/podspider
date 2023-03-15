@@ -1,4 +1,4 @@
-module dspm
+module podspider
 
 go 1.19
 

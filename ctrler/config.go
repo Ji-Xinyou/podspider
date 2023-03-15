@@ -9,8 +9,8 @@ import (
 
 // the configuration of clusterctrler, all fields should be cap
 type CtrlerConfig struct {
-	// the build of dspm
-	Build_mode string
+	// the log level
+	Log_level string
 
 	// the interval that the ctrler ticks and make executions
 	Tick_interval int
@@ -21,7 +21,7 @@ type CtrlerConfig struct {
 
 func DefaultCtrlerConfig() CtrlerConfig {
 	return CtrlerConfig{
-		Build_mode:    "debug",
+		Log_level:     "debug",
 		Tick_interval: 5,
 		WatchedNs:     "",
 	}
